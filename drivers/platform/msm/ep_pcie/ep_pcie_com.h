@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2015-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef __EP_PCIE_COM_H
@@ -92,6 +92,8 @@
 #define PCIE20_PARF_L1SS_SLEEP_MHI_FWD_ENABLE		BIT(4)
 
 #define PCIE20_PARF_L1SS_SLEEP_MODE_HANDLER_CONFIG	0x4D4
+
+#define PCIE20_PARF_LINK_DOWN_ECAM_BLOCK	0x608
 
 #define PCIE20_PARF_ATU_BASE_ADDR      0x634
 #define PCIE20_PARF_ATU_BASE_ADDR_HI   0x638
@@ -215,9 +217,7 @@
 #define BME_CHECK_MAX_COUNT		      100000
 #define PHY_STABILIZATION_DELAY_US_MIN	      1000
 #define PHY_STABILIZATION_DELAY_US_MAX	      1000
-#define REFCLK_STABILIZATION_DELAY_US_MIN     1000
-#define REFCLK_STABILIZATION_DELAY_US_MAX     1000
-#define PHY_READY_TIMEOUT_COUNT               30000
+#define PHY_READY_TIMEOUT_MS                  30000
 #define MSI_EXIT_L1SS_WAIT	              10
 #define MSI_EXIT_L1SS_WAIT_MAX_COUNT          100
 #define XMLH_LINK_UP                          0x400
@@ -416,6 +416,9 @@ struct ep_pcie_dev_t {
 	u16                          device_id;
 	u32                          subsystem_id;
 	u32                          link_speed;
+	/* Stores current link speed and link width */
+	u32                          current_link_speed;
+	u32                          current_link_width;
 	bool                         active_config;
 	bool                         aggregated_irq;
 	bool                         mhi_a7_irq;
@@ -466,6 +469,7 @@ struct ep_pcie_dev_t {
 	ulong                        d3_counter;
 	ulong                        perst_ast_counter;
 	ulong                        perst_deast_counter;
+	ktime_t                      ltssm_detect_ts;
 	ulong                        wake_counter;
 	ulong                        msi_counter;
 	ulong                        msix_counter;
@@ -492,6 +496,7 @@ struct ep_pcie_dev_t {
 
 	struct ep_pcie_register_event *event_reg;
 	struct work_struct           handle_bme_work;
+	struct work_struct           handle_clkreq;
 	struct work_struct           handle_d3cold_work;
 
 	struct clk		     *pipe_clk_mux;
@@ -505,6 +510,7 @@ struct ep_pcie_dev_t {
 	u32				tcsr_perst_enable_offset;
 	u32				perst_raw_rst_status_mask;
 	u32				pcie_disconnect_req_reg_mask;
+	u32				tcsr_hot_reset_en_offset;
 };
 
 extern struct ep_pcie_dev_t ep_pcie_dev;

@@ -645,7 +645,7 @@ static int context_restore_interrupted(struct vfastrpc_file *vfl,
 	return err;
 }
 
-static int context_alloc(struct vfastrpc_file *vfl, s64 seq_num,
+static int context_alloc(struct vfastrpc_file *vfl, uint32_t msg_type, s64 seq_num,
 			struct fastrpc_ioctl_invoke_async *invokefd,
 			struct vfastrpc_invoke_ctx **po)
 {
@@ -674,7 +674,7 @@ static int context_alloc(struct vfastrpc_file *vfl, s64 seq_num,
 	ctx->fds = (int *)(&ctx->lpra[bufs]);
 	ctx->attrs = (unsigned int *)(&ctx->fds[bufs]);
 
-	K_COPY_FROM_USER(err, fl->is_compat, (void *)ctx->lpra, invoke->pra,
+	K_COPY_FROM_USER(err, msg_type, (void *)ctx->lpra, invoke->pra,
 			bufs * sizeof(*ctx->lpra));
 	if (err)
 		goto bail;
@@ -826,16 +826,21 @@ static int get_args(struct vfastrpc_invoke_ctx *ctx)
 			attrs[i] &= ~FASTRPC_ATTR_KEEP_MAP;
 			err = vfastrpc_mmap_create(vfl, fds[i], attrs[i],
 					0, 0, dmaflags, &maps[i]);
-			if (!err && maps[i])
-				maps[i]->ctx_refs++;
 			if (err) {
 				for (j = bufs; j < i; j++) {
-					if (maps[j] && maps[j]->ctx_refs)
-						maps[j]->ctx_refs--;
-					vfastrpc_mmap_free(vfl, maps[j], 0);
+					if (maps[j] && maps[j]->dma_handle_refs) {
+						maps[j]->dma_handle_refs--;
+						vfastrpc_mmap_free(vfl, maps[j], 0);
+					}
 				}
 				mutex_unlock(&fl->map_mutex);
 				goto bail;
+			} else if (maps[i]) {
+				/*
+				 * Increment  refs count for in/out handle if map created
+				 * and no error, indicate map under use in remote call
+				 */
+				maps[i]->dma_handle_refs++;
 			}
 			handlelen += SIZE_OF_MAPPING(maps[i]->table->nents);
 		}
@@ -1157,9 +1162,10 @@ static int put_args(struct vfastrpc_invoke_ctx *ctx)
 			break;
 		if (!vfastrpc_mmap_find(vfl, (int)fdlist[i], 0, 0,
 					0, 0, &mmap)) {
-			if (mmap && mmap->ctx_refs)
-				mmap->ctx_refs--;
-			vfastrpc_mmap_free(vfl, mmap, 0);
+			if (mmap && mmap->dma_handle_refs) {
+				mmap->dma_handle_refs = 0;
+				vfastrpc_mmap_free(vfl, mmap, 0);
+			}
 		}
 	}
 	mutex_unlock(&fl->map_mutex);
@@ -1230,7 +1236,7 @@ void vfastrpc_queue_completed_async_job(struct vfastrpc_invoke_ctx *ctx)
 }
 
 int vfastrpc_internal_invoke(struct vfastrpc_file *vfl,
-			uint32_t mode, struct fastrpc_ioctl_invoke_async *inv)
+			uint32_t mode, struct fastrpc_ioctl_invoke_async *inv, uint32_t msg_type)
 {
 	struct fastrpc_file *fl = to_fastrpc_file(vfl);
 	struct fastrpc_ioctl_invoke *invoke = &inv->inv;
@@ -1269,7 +1275,7 @@ int vfastrpc_internal_invoke(struct vfastrpc_file *vfl,
 	lseq_num = atomic64_fetch_add(1, &vfl->seq_num);
 	trace_fastrpc_internal_invoke_start(invoke->handle, invoke->sc, lseq_num);
 
-	VERIFY(err, 0 == context_alloc(vfl, lseq_num, inv, &ctx));
+	VERIFY(err, 0 == context_alloc(vfl, msg_type, lseq_num, inv, &ctx));
 	if (err)
 		goto bail;
 	isasyncinvoke = (ctx->asyncjob.isasyncjob ? true : false);
@@ -1464,7 +1470,7 @@ bail:
 }
 
 int vfastrpc_internal_invoke2(struct vfastrpc_file *vfl,
-				struct fastrpc_ioctl_invoke2 *inv2)
+				struct fastrpc_ioctl_invoke2 *inv2, bool is_compat)
 {
 	union {
 		struct fastrpc_ioctl_invoke_async inv;
@@ -1473,7 +1479,7 @@ int vfastrpc_internal_invoke2(struct vfastrpc_file *vfl,
 	} p;
 	struct fastrpc_dsp_capabilities *dsp_cap_ptr = NULL;
 	struct fastrpc_file *fl = to_fastrpc_file(vfl);
-	uint32_t size = 0;
+	uint32_t size = 0, msg_type = 0;
 	int err = 0, domain = vfl->domain;
 
 	if (inv2->req == FASTRPC_INVOKE2_ASYNC ||
@@ -1502,8 +1508,9 @@ int vfastrpc_internal_invoke2(struct vfastrpc_file *vfl,
 		if (err)
 			goto bail;
 
+		msg_type = (is_compat) ? COMPAT_MSG : USER_MSG;
 		VERIFY(err, 0 == (err = vfastrpc_internal_invoke(vfl, fl->mode,
-						&p.inv)));
+						&p.inv, msg_type)));
 		if (err)
 			goto bail;
 		break;
@@ -1527,7 +1534,7 @@ int vfastrpc_internal_invoke2(struct vfastrpc_file *vfl,
 			err = -EBADE;
 			goto bail;
 		}
-		K_COPY_FROM_USER(err, fl->is_compat, &p.sess_info,
+		K_COPY_FROM_USER(err, is_compat, &p.sess_info,
 		(void *)inv2->invparam, inv2->size);
 		if (err)
 			goto bail;
